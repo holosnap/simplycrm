@@ -39,7 +39,7 @@ contactsRouter.get("/:id", async (req, res) => {
     include: {
       company: true,
       tags: { include: { tag: true } },
-      activityEntries: { orderBy: { occurredAt: "desc" } },
+      activities: { orderBy: { occurredAt: "desc" } },
       tasks: true,
     },
   });
@@ -92,7 +92,7 @@ contactsRouter.post("/:id/activity", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   if (!req.user) return res.status(401).json({ error: "Not authenticated" });
 
-  const entry = await prisma.activityEntry.create({
+  const entry = await prisma.activity.create({
     data: {
       contactId: req.params.id,
       authorId: req.user.userId,

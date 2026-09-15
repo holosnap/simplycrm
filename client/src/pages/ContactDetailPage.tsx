@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../lib/api";
 
-interface ActivityEntry {
+interface Activity {
   id: string;
   type: "note" | "call" | "email" | "meeting";
   body: string;
@@ -18,7 +18,7 @@ interface Contact {
   title: string | null;
   company: { id: string; name: string } | null;
   tags: { tag: { id: string; name: string } }[];
-  activityEntries: ActivityEntry[];
+  activities: Activity[];
   tasks: { id: string; title: string; status: "open" | "done" }[];
 }
 
@@ -82,7 +82,7 @@ export function ContactDetailPage() {
           <button type="submit">Add note</button>
         </form>
         <ul>
-          {contact.activityEntries.map((entry) => (
+          {contact.activities.map((entry) => (
             <li key={entry.id}>
               <strong>{entry.type}</strong> — {entry.body} (
               {new Date(entry.occurredAt).toLocaleString()})
