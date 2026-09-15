@@ -41,6 +41,7 @@ contactsRouter.get("/:id", async (req, res) => {
       tags: { include: { tag: true } },
       activities: { orderBy: { occurredAt: "desc" } },
       tasks: true,
+      deals: { orderBy: { createdAt: "desc" } },
     },
   });
   if (!contact) return res.status(404).json({ error: "Contact not found" });

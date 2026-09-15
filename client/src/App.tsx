@@ -8,6 +8,9 @@ import { ContactFormPage } from "./pages/ContactFormPage";
 import { CompaniesListPage } from "./pages/CompaniesListPage";
 import { CompanyDetailPage } from "./pages/CompanyDetailPage";
 import { CompanyFormPage } from "./pages/CompanyFormPage";
+import { DealsListPage } from "./pages/DealsListPage";
+import { DealDetailPage } from "./pages/DealDetailPage";
+import { DealFormPage } from "./pages/DealFormPage";
 import { TasksPage } from "./pages/TasksPage";
 import { CsvImportPage } from "./pages/CsvImportPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
@@ -28,6 +31,9 @@ export default function App() {
           <Route path="/companies" element={<CompaniesListPage />} />
           <Route path="/companies/new" element={<CompanyFormPage />} />
           <Route path="/companies/:id" element={<CompanyDetailPage />} />
+          <Route path="/deals" element={<DealsListPage />} />
+          <Route path="/deals/new" element={<DealFormPage />} />
+          <Route path="/deals/:id" element={<DealDetailPage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/admin/users" element={<AdminUsersPage />} />
           <Route path="/admin/settings" element={<AdminSettingsPage />} />

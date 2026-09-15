@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { publicUserSelect } from "../lib/publicUser";
 
 export const tasksRouter = Router();
 
@@ -12,7 +13,7 @@ tasksRouter.get("/", async (req, res) => {
       assigneeId: assigneeId ? String(assigneeId) : undefined,
       contactId: contactId ? String(contactId) : undefined,
     },
-    include: { contact: true, assignee: true },
+    include: { contact: true, assignee: { select: publicUserSelect } },
     orderBy: { dueAt: "asc" },
   });
   res.json({ tasks });

@@ -41,6 +41,7 @@ Root `package.json` only has cross-workspace scripts (`dev:server`, `dev:client`
 - Validate request bodies with a Zod schema and `safeParse`; on failure return `res.status(400).json({ error: parsed.error.flatten() })`. Reuse the same base schema with `.partial()` for PATCH.
 - Always import the shared Prisma client from `src/lib/prisma.ts` — never instantiate `new PrismaClient()` elsewhere.
 - Route handlers return the resource wrapped in a named key (`{ contact }`, `{ contacts }`, `{ deal }`), not bare arrays/objects, so the client can add metadata (pagination, etc.) later without a breaking shape change.
+- **Never `include: true` a `User` relation** (`owner`, `assignee`, `author`, etc.) — the full row includes `passwordHash`. Always `include: { owner: { select: publicUserSelect } }` using the shared select from `src/lib/publicUser.ts`.
 
 ## Client (React) conventions
 

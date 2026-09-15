@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { DEAL_STAGE_LABELS, formatCurrency, type DealStage } from "../lib/deals";
 
 interface Company {
   id: string;
@@ -8,6 +9,7 @@ interface Company {
   domain: string | null;
   notes: string | null;
   contacts: { id: string; firstName: string; lastName: string }[];
+  deals: { id: string; title: string; amount: string; stage: DealStage }[];
 }
 
 export function CompanyDetailPage() {
@@ -38,6 +40,18 @@ export function CompanyDetailPage() {
             </Link>
           </li>
         ))}
+        {company.contacts.length === 0 && <li>No contacts.</li>}
+      </ul>
+
+      <h2>Deals</h2>
+      <ul>
+        {company.deals.map((deal) => (
+          <li key={deal.id}>
+            <Link to={`/deals/${deal.id}`}>{deal.title}</Link> — {formatCurrency(deal.amount)} (
+            {DEAL_STAGE_LABELS[deal.stage]})
+          </li>
+        ))}
+        {company.deals.length === 0 && <li>No deals.</li>}
       </ul>
     </div>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { DEAL_STAGE_LABELS, formatCurrency, type DealStage } from "../lib/deals";
 
 interface Activity {
   id: string;
@@ -20,6 +21,7 @@ interface Contact {
   tags: { tag: { id: string; name: string } }[];
   activities: Activity[];
   tasks: { id: string; title: string; status: "open" | "done" }[];
+  deals: { id: string; title: string; amount: string; stage: DealStage }[];
 }
 
 export function ContactDetailPage() {
@@ -58,6 +60,19 @@ export function ContactDetailPage() {
         <p>Title: {contact.title ?? "—"}</p>
         <p>Company: {contact.company?.name ?? "—"}</p>
         <p>Tags: {contact.tags.map((t) => t.tag.name).join(", ") || "—"}</p>
+      </section>
+
+      <section>
+        <h2>Deals</h2>
+        <ul>
+          {contact.deals.map((deal) => (
+            <li key={deal.id}>
+              <Link to={`/deals/${deal.id}`}>{deal.title}</Link> —{" "}
+              {formatCurrency(deal.amount)} ({DEAL_STAGE_LABELS[deal.stage]})
+            </li>
+          ))}
+          {contact.deals.length === 0 && <li>No deals.</li>}
+        </ul>
       </section>
 
       <section>

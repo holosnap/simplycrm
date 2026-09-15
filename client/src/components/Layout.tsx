@@ -13,6 +13,7 @@ export function Layout() {
         <div className="brand">SimplyCRM</div>
         <NavLink to="/contacts">Contacts</NavLink>
         <NavLink to="/companies">Companies</NavLink>
+        <NavLink to="/deals">Deals</NavLink>
         <NavLink to="/tasks">Tasks</NavLink>
         {user.role === "admin" && <NavLink to="/admin/users">Users</NavLink>}
         {user.role === "admin" && <NavLink to="/admin/settings">Tags & Fields</NavLink>}
