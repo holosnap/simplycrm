@@ -3,8 +3,8 @@ import { AuthProvider } from "./context/AuthContext";
 import { Layout } from "./components/Layout";
 import { LoginPage } from "./pages/LoginPage";
 import { ContactsListPage } from "./pages/ContactsListPage";
-import { ContactDetailPage } from "./pages/ContactDetailPage";
-import { ContactFormPage } from "./pages/ContactFormPage";
+import { ContactDetailDrawer } from "./pages/ContactDetailDrawer";
+import { ContactFormDrawer } from "./pages/ContactFormDrawer";
 import { CompaniesListPage } from "./pages/CompaniesListPage";
 import { CompanyDetailPage } from "./pages/CompanyDetailPage";
 import { CompanyFormPage } from "./pages/CompanyFormPage";
@@ -24,10 +24,11 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route element={<Layout />}>
           <Route path="/" element={<Navigate to="/contacts" replace />} />
-          <Route path="/contacts" element={<ContactsListPage />} />
-          <Route path="/contacts/new" element={<ContactFormPage />} />
           <Route path="/contacts/import" element={<CsvImportPage />} />
-          <Route path="/contacts/:id" element={<ContactDetailPage />} />
+          <Route path="/contacts" element={<ContactsListPage />}>
+            <Route path="new" element={<ContactFormDrawer />} />
+            <Route path=":id" element={<ContactDetailDrawer />} />
+          </Route>
           <Route path="/companies" element={<CompaniesListPage />} />
           <Route path="/companies/new" element={<CompanyFormPage />} />
           <Route path="/companies/:id" element={<CompanyDetailPage />} />

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { publicUserSelect } from "../lib/publicUser";
 
 export const contactsRouter = Router();
 
@@ -24,13 +25,24 @@ contactsRouter.get("/", async (req, res) => {
         tag ? { tags: { some: { tag: { name: String(tag) } } } } : {},
       ],
     },
-    include: { company: true, tags: { include: { tag: true } } },
+    include: {
+      company: true,
+      tags: { include: { tag: true } },
+      owner: { select: publicUserSelect },
+      activities: { orderBy: { occurredAt: "desc" }, take: 1, select: { occurredAt: true } },
+    },
     orderBy: { lastName: "asc" },
     skip: (Number(page) - 1) * Number(pageSize),
     take: Number(pageSize),
   });
 
-  res.json({ contacts });
+  // Flatten the latest-activity lookup into a single field for the list view.
+  const shaped = contacts.map(({ activities, ...contact }) => ({
+    ...contact,
+    lastActivityAt: activities[0]?.occurredAt ?? null,
+  }));
+
+  res.json({ contacts: shaped });
 });
 
 contactsRouter.get("/:id", async (req, res) => {
@@ -38,6 +50,7 @@ contactsRouter.get("/:id", async (req, res) => {
     where: { id: req.params.id },
     include: {
       company: true,
+      owner: { select: publicUserSelect },
       tags: { include: { tag: true } },
       activities: { orderBy: { occurredAt: "desc" } },
       tasks: true,

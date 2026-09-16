@@ -125,6 +125,90 @@ button,
   font: inherit;
 }
 
+.secondary {
+  background: white;
+  color: #1a1a1a;
+  border: 1px solid #d1d5db;
+}
+
+.danger {
+  background: white;
+  color: #dc2626;
+  border: 1px solid #dc2626;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+tr.clickable-row {
+  cursor: pointer;
+}
+
+tr.clickable-row:hover {
+  background: #f0f1f3;
+}
+
+.field-error {
+  color: #dc2626;
+  font-size: 0.8rem;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.list-with-drawer {
+  display: flex;
+}
+
+.list-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 10;
+}
+
+.drawer {
+  width: 420px;
+  max-width: 100%;
+  height: 100%;
+  background: white;
+  border-left: 1px solid #d1d5db;
+  overflow-y: auto;
+  padding: 1.5rem;
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+
+.drawer-header h2 {
+  margin: 0;
+}
+
+.drawer-close {
+  background: none;
+  border: none;
+  color: #1a1a1a;
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0.25rem;
+}
+
 .centered-page {
   display: flex;
   align-items: center;
