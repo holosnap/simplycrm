@@ -1,5 +1,6 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser, type AddressObject, type ParsedMail } from "mailparser";
+import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import { isAttachmentStorageConfigured, uploadAttachment } from "./attachmentStorage";
@@ -16,6 +17,14 @@ import type { EmailDirection } from "@prisma/client";
 function isImapConfigured(): boolean {
   return Boolean(env.imapHost && env.imapUser && env.imapPassword);
 }
+
+// Generous but bounded: a message's full RFC822 source (headers + all MIME
+// parts, base64-inflated) is what gets buffered in memory whole before
+// parsing — see the size-check pass in syncFolder. 30MB comfortably covers
+// normal attachment-bearing mail (Gmail/Outlook cap attachments well under
+// this) while still bounding how much any single message, malicious or
+// otherwise, can force into memory at once.
+const MAX_INBOUND_MESSAGE_BYTES = 30 * 1024 * 1024;
 
 function firstAddress(addr: AddressObject | AddressObject[] | undefined): string | null {
   if (!addr) return null;
@@ -152,31 +161,45 @@ export async function upsertParsedMessage(
   const threadId = await resolveThreadId(parsed, contactId, subject);
   const attachments = await uploadInboundAttachments(parsed, rfc822MessageId);
 
-  await prisma.emailMessage.create({
-    data: {
-      threadId,
-      contactId,
-      direction,
-      authorId: null, // no known User authored an IMAP-discovered message — see CLAUDE.md
-      rfc822MessageId,
-      inReplyTo: parsed.inReplyTo ?? null,
-      fromAddress,
-      toAddresses: toAddresses.length > 0 ? toAddresses : ["unknown@unknown.invalid"],
-      ccAddresses,
-      subject,
-      bodyText: parsed.text ?? null,
-      bodyHtml: parsed.html || null,
-      // EmailMessageStatus was originally scoped to our own send pipeline
-      // (EMAIL_SPEC.md §4); repurposed here for IMAP-observed state since
-      // there's no better fit: "delivered" for mail that arrived in our
-      // inbox, "sent" for mail sitting in Sent (it evidently went out).
-      status: direction === "outbound" ? "sent" : "delivered",
-      sentAt: direction === "outbound" ? (parsed.date ?? new Date()) : null,
-      imapUid: BigInt(uid),
-      imapFolder: folder,
-      attachments: { create: attachments },
-    },
-  });
+  try {
+    await prisma.emailMessage.create({
+      data: {
+        threadId,
+        contactId,
+        direction,
+        authorId: null, // no known User authored an IMAP-discovered message — see CLAUDE.md
+        rfc822MessageId,
+        inReplyTo: parsed.inReplyTo ?? null,
+        fromAddress,
+        toAddresses: toAddresses.length > 0 ? toAddresses : ["unknown@unknown.invalid"],
+        ccAddresses,
+        subject,
+        bodyText: parsed.text ?? null,
+        bodyHtml: parsed.html || null,
+        // EmailMessageStatus was originally scoped to our own send pipeline
+        // (EMAIL_SPEC.md §4); repurposed here for IMAP-observed state since
+        // there's no better fit: "delivered" for mail that arrived in our
+        // inbox, "sent" for mail sitting in Sent (it evidently went out).
+        status: direction === "outbound" ? "sent" : "delivered",
+        sentAt: direction === "outbound" ? (parsed.date ?? new Date()) : null,
+        imapUid: BigInt(uid),
+        imapFolder: folder,
+        attachments: { create: attachments },
+      },
+    });
+  } catch (err) {
+    // rfc822MessageId is @unique — if another sync run (a second app
+    // instance, or an overlapping poll) raced us between the findUnique
+    // check above and this create, that race lands here as a unique
+    // constraint violation rather than silent data loss: the other run's
+    // row already exists with the same content, so this is a true no-op,
+    // not a failure. Anything else (a real DB error) still propagates and
+    // gets logged/skipped by syncFolder's per-message catch, same as today.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return;
+    }
+    throw err;
+  }
 
   await prisma.emailThread.update({ where: { id: threadId }, data: { lastMessageAt: parsed.date ?? new Date() } });
 
@@ -206,20 +229,44 @@ async function syncFolder(client: ImapFlow, folder: string, direction: EmailDire
   let maxUidSeen = state && !uidValidityChanged ? state.lastSeenUid : 0n;
 
   if (mailbox.exists > 0) {
-    for await (const message of client.fetch(`${startUid}:*`, { source: true }, { uid: true })) {
-      if (message.uid < startUid || !message.source) continue;
-
-      try {
-        const parsed = await simpleParser(message.source);
-        await upsertParsedMessage(folder, direction, message.uid, parsed);
-      } catch (err) {
-        // Logged and skipped, not retried indefinitely — a single
-        // unparseable message (malformed MIME, etc.) shouldn't stall sync
-        // of everything after it forever.
-        console.error(`IMAP sync: failed to process "${folder}" UID ${message.uid}:`, err);
-      }
-
+    // Check sizes before fetching any body. IMAP has no way to request a
+    // message's full RFC822 source and then "change its mind" partway
+    // through — once `source: true` is on a FETCH, the server sends the
+    // whole thing and imapflow buffers it into one Buffer per message. A
+    // single huge message (or an attacker-controlled one) would otherwise
+    // be pulled entirely into memory before we ever get a chance to look at
+    // it. This first pass fetches only `size`+`uid` (cheap, no body) so
+    // oversized messages can be excluded from the second, body-fetching
+    // pass entirely — never downloaded, not even once.
+    const safeUids: number[] = [];
+    for await (const message of client.fetch(`${startUid}:*`, { uid: true, size: true }, { uid: true })) {
+      if (message.uid < startUid) continue;
       if (BigInt(message.uid) > maxUidSeen) maxUidSeen = BigInt(message.uid);
+
+      if ((message.size ?? 0) > MAX_INBOUND_MESSAGE_BYTES) {
+        console.warn(
+          `IMAP sync: skipping "${folder}" UID ${message.uid} — ${((message.size ?? 0) / 1024 / 1024).toFixed(1)}MB, ` +
+            `over the ${MAX_INBOUND_MESSAGE_BYTES / 1024 / 1024}MB cap; left unprocessed, same as an unparseable message.`,
+        );
+        continue;
+      }
+      safeUids.push(message.uid);
+    }
+
+    if (safeUids.length > 0) {
+      for await (const message of client.fetch(safeUids, { source: true }, { uid: true })) {
+        if (!message.source) continue;
+
+        try {
+          const parsed = await simpleParser(message.source);
+          await upsertParsedMessage(folder, direction, message.uid, parsed);
+        } catch (err) {
+          // Logged and skipped, not retried indefinitely — a single
+          // unparseable message (malformed MIME, etc.) shouldn't stall sync
+          // of everything after it forever.
+          console.error(`IMAP sync: failed to process "${folder}" UID ${message.uid}:`, err);
+        }
+      }
     }
   }
 

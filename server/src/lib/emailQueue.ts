@@ -10,11 +10,21 @@ import { isPermanentError, backoffDelayMs, MAX_ATTEMPTS } from "./emailRetry";
 // background-worker infrastructure today (see CLAUDE.md), runs as one
 // process, and send volume is modest — a Postgres-backed queue with an
 // in-process ticker is durable (survives restarts; see recoverInterruptedSends
-// below) without a new infra dependency. It would NOT be safe as-is across
-// multiple app instances (no cross-process claim/locking — see the
-// `tickRunning` guard below, which only prevents overlap within one
-// process); horizontally scaling this app would need real row-level claiming
-// (e.g. `SELECT ... FOR UPDATE SKIP LOCKED`) or a move to a proper queue.
+// below) without a new infra dependency.
+//
+// The actual claim-a-row step (processMessage's initial updateMany, below)
+// IS safe across multiple app instances — it's a single conditional UPDATE
+// (`WHERE id = ? AND status = 'queued'`), so two processes racing on the same
+// row can't both flip it to "sending" and both call SES. What's still not
+// safe to horizontally scale is everything *around* that: BATCH_SIZE rows are
+// `SELECT`ed per tick with no cross-process locking, so two instances can
+// both select the same due row and one simply loses the race at claim time
+// (wasted work, not a correctness bug) — and `getMaxSendRate`'s pacing is
+// per-process, so N instances together could exceed the account's real send
+// rate even though each individually paces itself. Real row-level claiming
+// at the SELECT step too (e.g. `SELECT ... FOR UPDATE SKIP LOCKED`) or a move
+// to a proper queue would be needed to make scaling out actually efficient,
+// not just non-duplicating.
 
 const TICK_INTERVAL_MS = 2_000;
 const BATCH_SIZE = 10;
@@ -68,26 +78,34 @@ async function logSendActivity(message: QueuedEmailMessage, sentAt: Date) {
 }
 
 async function processMessage(messageId: string) {
-  const message = await prisma.emailMessage.findUnique({
-    where: { id: messageId },
-    include: { attachments: true },
-  });
-  if (!message || message.status !== "queued") return; // already handled (shouldn't happen in-process, but safe)
-
-  const claimed = await prisma.emailMessage.update({
-    where: { id: messageId },
+  // Claim atomically: the WHERE clause re-checks status: "queued" in the same
+  // round trip as the write, so two workers racing on the same row (two app
+  // instances, per the module comment above — or any future change that
+  // relaxes the in-process tickRunning guard) can't both pass a
+  // check-then-update gap and both call SES for the same message. Only the
+  // worker whose updateMany actually matched a row (count === 1) proceeds;
+  // the loser sees count 0 and backs off, since someone else already has it.
+  const { count } = await prisma.emailMessage.updateMany({
+    where: { id: messageId, status: "queued" },
     data: { status: "sending", attempts: { increment: 1 } },
+  });
+  if (count === 0) return; // lost the race to another worker, or already handled
+
+  const claimed = await prisma.emailMessage.findUnique({
+    where: { id: messageId },
     include: { attachments: true },
   });
+  // Nothing deletes an EmailMessage today, so this shouldn't happen — but a
+  // defensive null check here is cheap, and far cheaper than an uncaught
+  // throw aborting the rest of this tick's batch (see the catch in tick()).
+  if (!claimed) {
+    console.error(`Email ${messageId}: claimed for sending but row vanished before it could be sent — skipping.`);
+    return;
+  }
 
+  let sesMessageId: string;
   try {
-    const { sesMessageId } = await sendQueuedEmail(claimed);
-    const sentAt = new Date();
-    await prisma.emailMessage.update({
-      where: { id: messageId },
-      data: { status: "sent", sesMessageId, sentAt, lastError: null, nextAttemptAt: null },
-    });
-    await logSendActivity(claimed, sentAt);
+    ({ sesMessageId } = await sendQueuedEmail(claimed));
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -108,6 +126,33 @@ async function processMessage(messageId: string) {
         errorMessage,
       );
     }
+    return;
+  }
+
+  // SES has now accepted the message — it is irrevocably sent. Everything
+  // past this point is just recording that fact, and MUST NEVER feed back
+  // into the retry path above: if this write fails (a transient Postgres
+  // blip, say), the row is stuck at "sending" rather than "sent", but
+  // recovering it as a retry/resend would mean a second real email landing
+  // in the recipient's inbox for a message that already went out — worse
+  // than a DB row being briefly inconsistent with reality. Surface it loudly
+  // instead and leave it for manual reconciliation (same philosophy as
+  // recoverInterruptedSends, which treats "unknown whether SES got it" as
+  // never-auto-resume; this is the mirror case, "known SES got it," which
+  // must never auto-resume either).
+  try {
+    const sentAt = new Date();
+    await prisma.emailMessage.update({
+      where: { id: messageId },
+      data: { status: "sent", sesMessageId, sentAt, lastError: null, nextAttemptAt: null },
+    });
+    await logSendActivity(claimed, sentAt);
+  } catch (err) {
+    console.error(
+      `CRITICAL: email ${messageId} was accepted by SES (sesMessageId=${sesMessageId}) but failed to record as sent — ` +
+        `left at status "sending" rather than retried, to avoid a duplicate send. Needs manual reconciliation:`,
+      err,
+    );
   }
 }
 
