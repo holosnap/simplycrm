@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { env } from "./lib/env";
 import { startEmailQueueWorker } from "./lib/emailQueue";
+import { startImapSyncWorker } from "./lib/imapSync";
 import { requireAuth, requireAdmin } from "./middleware/auth";
 import { authRouter } from "./routes/auth";
 import { contactsRouter } from "./routes/contacts";
@@ -45,3 +46,4 @@ app.listen(env.port, () => {
 });
 
 startEmailQueueWorker();
+startImapSyncWorker();

@@ -14,7 +14,8 @@ server/                  Express + TypeScript API
   aws/                   IAM policy templates for the app's own runtime credentials
   scripts/               One-off operator scripts (e.g. ses-setup.ts) — run manually
                           with the operator's own AWS credentials, not app code
-  src/lib/               prisma client singleton, env loader, AWS SDK clients, email send/queue/retry
+  src/lib/               prisma client singleton, env loader, AWS SDK clients,
+                          email send/queue/retry, IMAP sync (inbound)
   src/middleware/auth.ts requireAuth / requireAdmin
   src/routes/*.ts        One router per resource
   src/types/             Ambient .d.ts for packages whose types our
@@ -64,6 +65,16 @@ Root `package.json` only has cross-workspace scripts (`dev:server`, `dev:client`
 - `lastError` on `EmailMessage` is surfaced in the UI whenever it's set, including mid-retry while `status` is still `queued` — not only once a message reaches terminal `failed`. A send failing silently is treated as a bug.
 - `EmailThread`/`EmailMessage` are built; `EmailEvent` (and the SNS event-ingestion pipeline that would populate it) is not — see EMAIL_SPEC.md's status line before assuming `status` ever reaches `delivered`/`bounced`/`complained` today.
 
+## Email receiving (IMAP)
+
+- Inbound stays on IMAP (`src/lib/imapSync.ts`), sending stays on SES (above) — see EMAIL_SPEC.md §5 for why these are two different pipelines rather than one. Today it's a **single shared mailbox** (one set of `IMAP_*` credentials), not per-user connected inboxes — a materially larger feature (per-user OAuth, token storage) tracked as a future option, not something this worker quietly grows into.
+- It's a **poller**, not a persistent IDLE connection: connect, sync `IMAP_INBOX_FOLDER` + `IMAP_SENT_FOLDER`, disconnect, repeat every `IMAP_POLL_INTERVAL_MS`. Simpler than managing IDLE's reconnect/renewal lifecycle, at the cost of up-to-one-interval latency — same polling-over-push tradeoff as the send queue.
+- **Dedupe is always by `rfc822MessageId`** (`upsertParsedMessage` in `imapSync.ts`). A message we sent via SES shows up again when the Sent folder is synced; finding an existing row by Message-ID means "record where we saw it" (`imapUid`/`imapFolder`), never "create a second row." Don't key reconciliation on anything else (UID, subject, etc.) — those aren't stable/unique the way Message-ID is.
+- **UIDVALIDITY changing means every previously-stored UID for that folder is void** (`ImapFolderState`, per-folder) — this isn't a bug to work around, it's what the IMAP protocol means by UIDVALIDITY changing. Handle it as a full resync (start from UID 1 again), not by trying to reconcile old and new UIDs.
+- A message that fails to parse is logged and skipped, not retried forever — `lastSeenUid` still advances past it. Prioritizes forward progress over perfect delivery of one pathological message; don't change this to block the whole folder on a single bad message.
+- **No `Activity` row for IMAP-discovered messages.** `Activity.authorId` is required (real accountability data — see the Prisma conventions above), and no `User` authored an inbound email or a message sent outside the CRM. These messages are still fully visible via the Email section's thread view (reads `EmailThread`/`EmailMessage` directly), so don't try to force a fake author just to get a timeline entry.
+- `EmailMessageStatus` is reused for IMAP-observed messages (`delivered` for inbound, `sent` for outbound found in Sent) even though the enum was originally scoped to our own send pipeline — there's no better fit; don't read much into an IMAP-sourced message's `status` beyond "this message exists and which folder-ish side it's on."
+
 ## Client (React) conventions
 
 - One component per file in `src/pages/`, named `<Thing>Page.tsx`; register its route in `src/App.tsx`. List pages fetch on mount with `useEffect`; detail pages take the id from `useParams`.
@@ -81,7 +92,7 @@ Server (`cd server`): `npm run prisma:generate`, `npm run prisma:migrate` (dev m
 
 ## Environment
 
-Each workspace has a `.env.example`; copy to `.env` locally (`.env` is gitignored, never commit it). Server needs a running Postgres reachable at `DATABASE_URL`. Seeded login: `admin@example.com` / `changeme123` (plus a few `@example.com` team users — see `prisma/seed.ts`). Email (AWS SES) is optional and unset by default — see `SETUP.md` to provision it; the app boots fine without it, with the email health check reporting "not configured."
+Each workspace has a `.env.example`; copy to `.env` locally (`.env` is gitignored, never commit it). Server needs a running Postgres reachable at `DATABASE_URL`. Seeded login: `admin@example.com` / `changeme123` (plus a few `@example.com` team users — see `prisma/seed.ts`). Email sending (AWS SES) and receiving (`IMAP_*`) are both optional and unset by default — see `SETUP.md` to provision SES; the app boots fine with either or both unconfigured, each worker just logging that it's disabled rather than failing startup.
 
 ## Adding a new entity — checklist
 

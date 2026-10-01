@@ -21,4 +21,21 @@ export const env = {
   sesSendingDomain: process.env.SES_SENDING_DOMAIN,
   sesConfigurationSet: process.env.SES_CONFIGURATION_SET,
   sesFromAddress: process.env.SES_FROM_ADDRESS,
+
+  // IMAP (inbound) is likewise optional. Unlike AWS, plain IMAP auth has no
+  // ambient credential chain to defer to — imapflow needs the password
+  // handed to it directly — so this is the one place it's read from env,
+  // passed straight into the ImapFlow client (src/lib/imapSync.ts), and
+  // never logged, stored, or passed anywhere else.
+  imapHost: process.env.IMAP_HOST,
+  imapPort: process.env.IMAP_PORT ? Number(process.env.IMAP_PORT) : 993,
+  imapSecure: process.env.IMAP_SECURE !== "false",
+  imapUser: process.env.IMAP_USER,
+  imapPassword: process.env.IMAP_PASSWORD,
+  imapInboxFolder: process.env.IMAP_INBOX_FOLDER ?? "INBOX",
+  imapSentFolder: process.env.IMAP_SENT_FOLDER ?? "Sent",
+  imapPollIntervalMs: Number(process.env.IMAP_POLL_INTERVAL_MS ?? 60_000),
+  // Sending domain also used as the fallback Message-ID host for inbound
+  // mail that arrives with no Message-ID header at all (rare, but happens).
+  imapFallbackMessageIdHost: process.env.SES_SENDING_DOMAIN ?? "localhost",
 };

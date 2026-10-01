@@ -263,6 +263,11 @@ model EmailMessage {
   attempts        Int                @default(0)
   nextAttemptAt   DateTime?          @map("next_attempt_at")
   lastError       String?            @map("last_error")
+  // Set when this row was found (or confirmed) via the IMAP sync worker —
+  // null for a message that only exists because we sent it via SES and
+  // haven't seen it echoed back in the mailbox yet. See EMAIL_SPEC.md §5.
+  imapUid         BigInt?            @map("imap_uid")
+  imapFolder      String?            @map("imap_folder")
   createdAt       DateTime           @default(now()) @map("created_at")
   updatedAt       DateTime           @updatedAt @map("updated_at")
   sentAt          DateTime?          @map("sent_at")
@@ -289,4 +294,19 @@ model EmailAttachment {
   message EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
 
   @@map("email_attachments")
+}
+
+// Per-folder IMAP sync checkpoint (one row per watched folder, e.g. "INBOX",
+// "Sent"). UIDs are only meaningful within a given UIDVALIDITY epoch — if the
+// server reports a different uidValidity than what's stored here, every
+// previously-seen UID is void and the folder must be resynced from scratch;
+// see imapSync.ts.
+model ImapFolderState {
+  id          String   @id @default(uuid())
+  folder      String   @unique
+  uidValidity BigInt   @map("uid_validity")
+  lastSeenUid BigInt   @default(0) @map("last_seen_uid")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("imap_folder_state")
 }

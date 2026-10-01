@@ -1,6 +1,6 @@
 # Email Integration Spec
 
-Status: **sending is implemented** (§1, §2's identity/SETUP.md, §4's `EmailThread`/`EmailMessage`/`EmailAttachment`, plus the queue/retry design added in §4a below). **Receiving is not** — §3's event ingestion and §5's inbound pipeline, including the `EmailEvent` model, remain unbuilt; `EmailMessage.status` today only ever reaches `sent` (what SES accepted) or `failed` (what our own queue gave up on) — it can't yet learn `delivered`/`bounced`/`complained` from SES, since nothing consumes SES's events yet. This covers sending/receiving email through AWS SES and how it plugs into the existing `Contact` / `Deal` / `Activity` data model (see [SPEC.md](./SPEC.md), [CLAUDE.md](./CLAUDE.md)). Several points below are genuine tradeoffs rather than clear-cut defaults — they're marked **⚠ Decision needed** and summarized again in §8.
+Status: **sending (SES) and receiving (IMAP) are both implemented**, but via different mechanisms than §5 originally recommended — see the note at the top of §5 before reading it as a plan rather than a decision record. **SES's own event ingestion is not built** — §3's SNS pipeline and the `EmailEvent` model remain unbuilt, so a message we sent still only ever reaches `EmailMessage.status: "sent"` (what SES accepted at send time) or `"failed"` (what our own queue gave up on); nothing yet tells us from SES whether it was actually `delivered`/`bounced`/`complained` — only via IMAP, if it happens to also pass back through the synced mailbox. This covers sending/receiving email through AWS SES + IMAP and how it plugs into the existing `Contact` / `Deal` / `Activity` data model (see [SPEC.md](./SPEC.md), [CLAUDE.md](./CLAUDE.md)). Several points below are genuine tradeoffs rather than clear-cut defaults — they're marked **⚠ Decision needed** and summarized again in §8.
 
 ## 1. SES v2 API vs. SMTP
 
@@ -126,7 +126,7 @@ SES has **two different "message ID" concepts** that are easy to conflate:
 
 So: `sesMessageId` correlates **our send → SES's events** (API-level). `rfc822MessageId` correlates **our message → a reply to it** (header-level, used when resolving inbound mail to a thread in §5). Both are needed; they serve different parts of the pipeline and must not be assumed interchangeable.
 
-**Integration with the existing `Activity` model:** `ActivityType` already has an `email` value (see `server/prisma/schema.prisma`). When an `EmailMessage` is sent or received, create a corresponding `Activity` row (`type: email`, `body`: subject + snippet) linked to the same `Contact`/`Deal`, so email shows up in the existing contact timeline UI without that UI needing to know about `EmailMessage` at all. `EmailMessage` is the detailed record (headers, body, delivery status); `Activity` is the timeline-summary projection of it — don't duplicate full body content into `Activity.body`, just enough to render the timeline row.
+**Integration with the existing `Activity` model:** `ActivityType` already has an `email` value (see `server/prisma/schema.prisma`). **Revised from the original plan**: a corresponding `Activity` row is only created for messages sent through our own compose/reply routes, where `authorId` is a real `User` — not for anything the IMAP sync worker discovers (§5), since `Activity.authorId` is required and there's no `User` to honestly attribute an inbound (or externally-sent-outbound) message to. Those are still fully visible via the Email section's thread view, which reads `EmailThread`/`EmailMessage` directly rather than going through `Activity` at all. `EmailMessage` is the detailed record (headers, body, delivery status); `Activity` is a timeline-summary projection of the subset of it that has a real author — don't force one for messages that don't.
 
 ## 4a. Sending: queue, retry, and rate limiting
 
@@ -143,6 +143,8 @@ Sends are queued, never fired inline from the request — the compose/reply rout
 **Failure is always visible, never silent:** `lastError` is surfaced in the UI whenever it's set — including while a message is still `queued` and waiting on its next retry, not only once it reaches terminal `failed` — and the thread list polls while anything is in flight so a later failure shows up without the user reopening the panel.
 
 ## 5. Receiving Email: SES Inbound vs. IMAP — the real tradeoff
+
+**Decision made: IMAP (§5a), not SES inbound.** This section was originally written recommending SES inbound as the v1 scope, with IMAP as a larger, separate future feature — the analysis below is kept as the decision record (it's still accurate about what each option is/isn't good for), but the actual direction taken was explicit: keep sending on SES while inbound goes through IMAP against a single shared mailbox. That means this build gets option (b)'s basic shape (reading a real mailbox) without yet paying (b)'s full cost from the original analysis — no per-user OAuth, because it's one shared account, not one per rep. See §5a for what that actually looks like and what it still doesn't cover.
 
 These two options don't actually solve the same problem, which is the first thing to get straight before picking one.
 
@@ -161,6 +163,29 @@ These two options don't actually solve the same problem, which is the first thin
 
 If (a): the inbound pipeline is receipt rule → S3 (raw MIME) → SNS notification → (same SNS→app mechanism decided in §3) → fetch the object from S3, parse MIME, resolve `In-Reply-To`/`References` headers against `EmailMessage.rfc822MessageId` to find the thread (fall back to the `reply+<token>@` local-part if headers are stripped/mangled, which happens with some mail clients/forwarders), create the inbound `EmailMessage` + `Activity`.
 
+## 5a. What was actually built: IMAP against a single shared mailbox
+
+`server/src/lib/imapSync.ts`, using `imapflow` (client) and `mailparser` (MIME parsing). No SES inbound, no S3, no inbound-side SNS — none of §3's event-destination machinery is involved in receiving at all; that's purely an outbound-events concern (still unbuilt either way, per the status line at the top of this document).
+
+**Scope, explicitly:** one IMAP account (`IMAP_HOST`/`IMAP_USER`/`IMAP_PASSWORD`), syncing two folders (`IMAP_INBOX_FOLDER`, `IMAP_SENT_FOLDER`, both configurable — folder naming isn't standardized, e.g. Gmail uses `[Gmail]/Sent Mail`). **Not** per-rep connected mailboxes — that's still the larger, separate feature the original §5 analysis described under option (b), with its own OAuth/token-storage cost that this build does not pay. If "every rep connects their own inbox" becomes the actual requirement, that's new work, not an extension of this worker.
+
+**Poll, don't push:** a `setInterval` loop — connect, sync both folders, disconnect, repeat every `IMAP_POLL_INTERVAL_MS` (default 60s) — rather than a persistent IDLE connection. ⚠ **Judgment call**, same shape as §4a's send-queue tradeoff: IDLE would cut latency to near-zero but means managing a long-lived connection's reconnect logic and RFC 2177's ~29-minute IDLE renewal window; polling is simpler and more robust to get right, at the cost of up to one poll interval of lag before new mail shows up. Revisit if near-real-time inbound matters more than operational simplicity.
+
+**Resuming instead of refetching:** `ImapFolderState` persists `uidValidity` and `lastSeenUid` per folder. Normal case: next sync fetches `UID (lastSeenUid+1):*`. If the server reports a **different** `uidValidity` than stored, every previously-recorded UID for that folder is void by IMAP's own rules (RFC 3501 §2.3.1.1) — handled as a full resync (`UID 1:*`), not an attempt to reconcile old and new UID spaces, which isn't meaningful. Verified directly against Postgres (the resume-vs-resync decision and a real server restart mid-sync), though not against a real IMAP server's actual UIDVALIDITY-change behavior — no test mailbox was available to trigger that condition for real.
+
+**Reconciling SES-sent mail against the Sent folder:** every `EmailMessage` (sent via SES or discovered via IMAP) is deduped purely on `rfc822MessageId` (`upsertParsedMessage`). A message created at compose time and later seen again while syncing Sent just gets its `imapUid`/`imapFolder` recorded on the existing row — never a second row. Verified end-to-end against real Postgres data (a seeded SES-sent message was "found" again via a simulated Sent-folder fetch; message count was unchanged, `direction` stayed correct).
+
+**Threading:** `In-Reply-To`/`References` resolved against existing `EmailMessage.rfc822MessageId` first (correct per RFC 5322); falls back to a loose contact + normalized-subject match (`Re:`/`Fwd:` prefixes stripped) when headers are missing or stripped; otherwise starts a new `EmailThread`. Verified: a synthetic reply with `In-Reply-To` set resolved to the same thread as its parent.
+
+**Contact linking:** by email address — inbound links via the `From` address, a Sent-folder message not already in our DB links via its first `To` address. Both are exact-ish (case-insensitive) matches against `Contact.email`; no fuzzy matching, no handling of a contact with multiple known addresses.
+
+**No `Activity` row for anything IMAP discovers** — see the correction in §4's Activity-integration note above. `authorId` on an IMAP-sourced `EmailMessage` is always `null`.
+
+**Known gaps, not addressed here:**
+- No historical backfill cap — first sync of a long-lived mailbox fetches its entire history for the watched folders. Fine for a fresh/small mailbox; could be slow for an old one. A `SINCE`-bounded initial sync would be the fix if this becomes a real problem.
+- A message that fails to parse is logged and skipped (not retried) — see CLAUDE.md.
+- No handling of multiple `From` addresses, address groups beyond the first entry, or a contact with more than one known email address.
+
 ## 6. IAM Policy
 
 Least-privilege, split by **when** the permission is needed — runtime (the app's own role/user) vs. provisioning (done once via console/IaC by whoever sets this up, not something the app ever calls). **The actual shipped runtime policy is [`server/aws/ses-iam-policy.json`](./server/aws/ses-iam-policy.json), explained in [SETUP.md](./SETUP.md#4-iam-policy-for-the-running-app)** — that's the authoritative copy; this section summarizes rather than duplicates it, to avoid the two drifting apart.
@@ -171,11 +196,11 @@ Least-privilege, split by **when** the permission is needed — runtime (the app
 
 ## 7. Dependencies / Config Summary
 
-- Runtime dependencies (server only): `@aws-sdk/client-sesv2`; `nodemailer` (just for its `MailComposer` — raw MIME building, no SMTP transport ever constructed, per §1).
+- Runtime dependencies (server only): `@aws-sdk/client-sesv2`; `nodemailer` (just for its `MailComposer` — raw MIME building, no SMTP transport ever constructed, per §1); `imapflow` (IMAP client, ships its own types); `mailparser` (MIME parsing, needs `@types/mailparser` separately — it doesn't ship its own, unlike the others here).
 - Dev-only dependency: `@aws-sdk/client-sns`, used solely by the provisioning script (`server/scripts/ses-setup.ts`) to create the events topic — the running app never calls any SNS API itself (see §6).
-- Env vars (`server/.env.example`, all optional — the app boots fine without them): `AWS_REGION`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (local dev only — never set in deployment, where an IAM role is used instead), `SES_SENDING_DOMAIN`, `SES_CONFIGURATION_SET`, `SES_FROM_ADDRESS`.
-- Prisma models shipped: `EmailThread`, `EmailMessage`, `EmailAttachment` (§4), plus `User.signatureText` for per-user signatures. **Not yet shipped:** `EmailEvent` and its `EmailEventType` enum — that's tied to §3's unbuilt event ingestion.
-- New infra (outside this repo, provisioned via `server/scripts/ses-setup.ts` + `SETUP.md`): verified SES domain identity + DKIM/SPF/DMARC DNS records, one configuration set (reputation metrics on), one SNS topic wired as its event destination, account-level suppression list. **Not yet provisioned:** anything SQS/S3/receipt-rule related — that's §3/§5, still unbuilt.
+- Env vars (`server/.env.example`, all optional — the app boots fine without them): `AWS_REGION`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (local dev only — never set in deployment, where an IAM role is used instead), `SES_SENDING_DOMAIN`, `SES_CONFIGURATION_SET`, `SES_FROM_ADDRESS`; `IMAP_HOST`/`IMAP_PORT`/`IMAP_SECURE`/`IMAP_USER`/`IMAP_PASSWORD` (a real password — no credential-chain equivalent exists for plain IMAP, see CLAUDE.md), `IMAP_INBOX_FOLDER`/`IMAP_SENT_FOLDER`/`IMAP_POLL_INTERVAL_MS`.
+- Prisma models shipped: `EmailThread`, `EmailMessage`, `EmailAttachment`, `ImapFolderState` (§4, §5a), plus `User.signatureText` for per-user signatures and `EmailMessage.imapUid`/`imapFolder` for IMAP traceability. **Not yet shipped:** `EmailEvent` and its `EmailEventType` enum — that's tied to §3's unbuilt SES event ingestion (receiving itself is built, via IMAP, per §5a — these are separate things).
+- New infra (outside this repo, provisioned via `server/scripts/ses-setup.ts` + `SETUP.md`): verified SES domain identity + DKIM/SPF/DMARC DNS records, one configuration set (reputation metrics on), one SNS topic wired as its event destination, account-level suppression list; one IMAP mailbox account (credentials only, provisioned wherever that mailbox already lives — nothing to stand up). **Not yet provisioned:** anything SQS/S3/SES-receipt-rule related — that's §3's still-unbuilt outbound event ingestion; it was never needed for §5a's IMAP-based receiving in the first place.
 
 ## 8. Decisions Flagged for Product/Infra Sign-off
 
@@ -184,6 +209,7 @@ Collected from above — none of these are blocked on code, but code shouldn't s
 1. **§2 — Shared sending address vs. per-user sending address.** Defaulted to shared (`notifications@mail.simplycrm.app`) + `Reply-To` per thread.
 2. **§3 — SNS→HTTPS webhook vs. SNS→SQS→worker** for event ingestion. Defaulted to the webhook for v1 given no worker infra exists yet, revisit when/if inbound (§5) justifies standing up a worker anyway.
 3. **§4 — Raw JSON payload vs. normalized columns** for bounce/complaint detail on `EmailEvent`. Defaulted to raw JSON; promote fields to columns only when a real query need shows up.
-4. **§5 — The big one: "capture replies to CRM mail" vs. "sync the rep's real inbox."** These are different features with different cost (self-contained vs. per-user OAuth + a second ingestion pipeline). Defaulting this spec's scope to the former; the latter is out of scope here, not a natural follow-on.
-5. **§5 — Exact SES-inbound-supported region**, which constrains where the receipt rule/S3 bucket live — needs a current-docs check at implementation time, not assumed from this document.
-6. **§4a — In-process Postgres-polling send queue vs. a real job-queue library or SQS.** Defaulted to in-process polling: durable across restarts, no new infra, but not safe across multiple app instances as written. Revisit alongside decision 2 above if this app is ever horizontally scaled or a worker process gets stood up for inbound anyway.
+4. **§5 — RESOLVED, by explicit instruction: IMAP, not SES inbound** — and not quite either of the original two options. It's a single shared mailbox (§5a), so it has (a)'s low setup cost (no per-user OAuth) while giving something closer to (b)'s shape (a real mailbox, not just captured replies to CRM-generated mail). Per-rep connected mailboxes remain a distinct, larger, unaddressed feature if that turns out to be the actual ask.
+5. **§5 — SES-inbound-supported region** is now moot — not used, since receiving went through IMAP instead.
+6. **§4a — In-process Postgres-polling send queue vs. a real job-queue library or SQS.** Defaulted to in-process polling: durable across restarts, no new infra, but not safe across multiple app instances as written. Revisit alongside decision 2 above if this app is ever horizontally scaled — and now also alongside decision 7, since a worker process exists for IMAP polling too.
+7. **§5a — IMAP poll vs. persistent IDLE connection.** Defaulted to polling (60s default) for the same reason as decision 6 — simpler failure/reconnect model, no infra to stand up — at the cost of up to one poll interval of latency on new mail. Revisit if near-real-time inbound becomes a real requirement.
