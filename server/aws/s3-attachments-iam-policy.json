@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EmailAttachmentObjectAccess",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::ATTACHMENTS_S3_BUCKET/email-attachments/*"
+    }
+  ]
+}

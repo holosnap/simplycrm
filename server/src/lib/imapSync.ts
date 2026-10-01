@@ -2,6 +2,7 @@ import { ImapFlow } from "imapflow";
 import { simpleParser, type AddressObject, type ParsedMail } from "mailparser";
 import { prisma } from "./prisma";
 import { env } from "./env";
+import { isAttachmentStorageConfigured, uploadAttachment } from "./attachmentStorage";
 import type { EmailDirection } from "@prisma/client";
 
 // Inbound stays on IMAP (a single shared mailbox) while sending goes through
@@ -84,6 +85,38 @@ async function resolveThreadId(parsed: ParsedMail, contactId: string | null, sub
   return thread.id;
 }
 
+// A single oversized/corrupt attachment shouldn't lose the whole message —
+// same "forward progress over perfect delivery" principle as a message that
+// fails to parse (see syncFolder below) — so each attachment is uploaded
+// independently and a failure just drops that one, logged, rather than
+// failing the message. If attachment storage isn't configured at all, every
+// attachment on the message is dropped (the message itself still syncs).
+async function uploadInboundAttachments(parsed: ParsedMail, rfc822MessageId: string) {
+  if (parsed.attachments.length === 0) return [];
+  if (!isAttachmentStorageConfigured()) {
+    console.warn(
+      `IMAP sync: dropping ${parsed.attachments.length} attachment(s) on ${rfc822MessageId} — attachment storage is not configured (see SETUP.md).`,
+    );
+    return [];
+  }
+
+  const uploaded: Awaited<ReturnType<typeof uploadAttachment>>[] = [];
+  for (const attachment of parsed.attachments) {
+    try {
+      uploaded.push(
+        await uploadAttachment({
+          filename: attachment.filename ?? "attachment",
+          declaredContentType: attachment.contentType,
+          data: attachment.content as Buffer,
+        }),
+      );
+    } catch (err) {
+      console.error(`IMAP sync: failed to store an attachment on ${rfc822MessageId}:`, err);
+    }
+  }
+  return uploaded;
+}
+
 // Dedupe on Message-ID: a message we sent via SES also shows up here when we
 // sync the Sent folder. If a row already exists (because emailThreads.ts
 // created it at compose time) this just records where we saw it via IMAP and
@@ -109,6 +142,7 @@ export async function upsertParsedMessage(
 
   const fromAddress = firstAddress(parsed.from) ?? "unknown@unknown.invalid";
   const toAddresses = allAddresses(parsed.to);
+  const ccAddresses = allAddresses(parsed.cc);
   // Inbound: link by who sent it to us. Outbound (Sent folder, not already
   // in our DB — e.g. sent directly via webmail, bypassing the CRM): link by
   // who we sent it to.
@@ -116,6 +150,7 @@ export async function upsertParsedMessage(
   const contactId = await findContactIdByEmail(linkEmail);
   const subject = parsed.subject ?? "(no subject)";
   const threadId = await resolveThreadId(parsed, contactId, subject);
+  const attachments = await uploadInboundAttachments(parsed, rfc822MessageId);
 
   await prisma.emailMessage.create({
     data: {
@@ -127,6 +162,7 @@ export async function upsertParsedMessage(
       inReplyTo: parsed.inReplyTo ?? null,
       fromAddress,
       toAddresses: toAddresses.length > 0 ? toAddresses : ["unknown@unknown.invalid"],
+      ccAddresses,
       subject,
       bodyText: parsed.text ?? null,
       bodyHtml: parsed.html || null,
@@ -138,13 +174,7 @@ export async function upsertParsedMessage(
       sentAt: direction === "outbound" ? (parsed.date ?? new Date()) : null,
       imapUid: BigInt(uid),
       imapFolder: folder,
-      attachments: {
-        create: parsed.attachments.map((attachment) => ({
-          filename: attachment.filename ?? "attachment",
-          contentType: attachment.contentType,
-          data: attachment.content as Buffer,
-        })),
-      },
+      attachments: { create: attachments },
     },
   });
 

@@ -256,6 +256,7 @@ model EmailMessage {
   inReplyTo       String?            @map("in_reply_to")
   fromAddress     String             @map("from_address")
   toAddresses     String[]           @map("to_addresses")
+  ccAddresses     String[]           @map("cc_addresses")
   subject         String
   bodyText        String?            @map("body_text")
   bodyHtml        String?            @map("body_html")
@@ -283,13 +284,23 @@ model EmailMessage {
   @@map("email_messages")
 }
 
+// Attachment bytes live in S3, never Postgres — see CLAUDE.md "Email
+// attachments". `declaredContentType` is whatever the sender/compose request
+// claimed; `detectedContentType` is sniffed from the actual bytes
+// (server/src/lib/attachmentStorage.ts, via magic-byte detection) and may be
+// null when the format isn't detectable (e.g. plain text, CSV) — callers
+// must not trust `declaredContentType` alone for anything security-sensitive
+// (e.g. deciding how to render it), and `filename` is sender-supplied and
+// must never be trusted for filesystem paths.
 model EmailAttachment {
-  id             String   @id @default(uuid())
-  emailMessageId String   @map("email_message_id")
-  filename       String
-  contentType    String   @map("content_type")
-  data           Bytes
-  createdAt      DateTime @default(now()) @map("created_at")
+  id                  String   @id @default(uuid())
+  emailMessageId      String   @map("email_message_id")
+  filename            String
+  declaredContentType String   @map("declared_content_type")
+  detectedContentType String?  @map("detected_content_type")
+  sizeBytes           Int      @map("size_bytes")
+  s3Key               String   @map("s3_key")
+  createdAt           DateTime @default(now()) @map("created_at")
 
   message EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
 

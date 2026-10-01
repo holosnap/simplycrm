@@ -4,6 +4,7 @@ import type { EmailAttachment, EmailMessage } from "@prisma/client";
 import { sesClient } from "./ses";
 import { prisma } from "./prisma";
 import { env } from "./env";
+import { getAttachmentBytes } from "./attachmentStorage";
 
 export type QueuedEmailMessage = EmailMessage & { attachments: EmailAttachment[] };
 
@@ -30,22 +31,32 @@ function needsRawMime(message: QueuedEmailMessage, references: string[]): boolea
   return message.attachments.length > 0 || Boolean(message.inReplyTo) || references.length > 0;
 }
 
-function buildRawMime(message: QueuedEmailMessage, references: string[]): Promise<Buffer> {
+async function buildRawMime(message: QueuedEmailMessage, references: string[]): Promise<Buffer> {
+  // Attachment bytes live in S3, not on the row (see CLAUDE.md "Email
+  // attachments") — fetch each one back out before handing it to
+  // MailComposer. Uses the sniffed content type when we have one, same as
+  // the download path, rather than trusting what the sender/compose request
+  // originally declared.
+  const attachments = await Promise.all(
+    message.attachments.map(async (attachment) => ({
+      filename: attachment.filename,
+      content: await getAttachmentBytes(attachment.s3Key),
+      contentType: attachment.detectedContentType ?? attachment.declaredContentType,
+    })),
+  );
+
   return new Promise((resolve, reject) => {
     const composer = new MailComposer({
       from: message.fromAddress,
       to: message.toAddresses,
+      cc: message.ccAddresses.length > 0 ? message.ccAddresses : undefined,
       subject: message.subject,
       messageId: message.rfc822MessageId,
       inReplyTo: message.inReplyTo ?? undefined,
       references: references.length > 0 ? references : undefined,
       text: message.bodyText ?? undefined,
       html: message.bodyHtml ?? undefined,
-      attachments: message.attachments.map((attachment) => ({
-        filename: attachment.filename,
-        content: attachment.data,
-        contentType: attachment.contentType,
-      })),
+      attachments,
     });
 
     composer.compile().build((err, builtMessage) => {
@@ -72,7 +83,10 @@ export async function sendQueuedEmail(message: QueuedEmailMessage): Promise<{ se
   const response = await sesClient.send(
     new SendEmailCommand({
       FromEmailAddress: message.fromAddress,
-      Destination: { ToAddresses: message.toAddresses },
+      Destination: {
+        ToAddresses: message.toAddresses,
+        CcAddresses: message.ccAddresses.length > 0 ? message.ccAddresses : undefined,
+      },
       ConfigurationSetName: env.sesConfigurationSet,
       EmailTags: emailTags,
       Content: useRaw

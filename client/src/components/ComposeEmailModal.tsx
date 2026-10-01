@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Drawer } from "./Drawer";
 import { api, ApiError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -8,6 +8,10 @@ interface ComposeEmailModalProps {
   contactId?: string;
   dealId?: string;
   replyToThreadId?: string;
+  // Only meaningful alongside replyToThreadId and no defaultTo — which
+  // addresses count as "ours" (to exclude) isn't something the client knows,
+  // so the actual To/Cc are fetched from the server (see the effect below).
+  replyMode?: "reply" | "replyAll";
   defaultTo?: string[];
   defaultSubject?: string;
   onClose: () => void;
@@ -18,6 +22,7 @@ export function ComposeEmailModal({
   contactId,
   dealId,
   replyToThreadId,
+  replyMode = "reply",
   defaultTo = [],
   defaultSubject = "",
   onClose,
@@ -25,11 +30,38 @@ export function ComposeEmailModal({
 }: ComposeEmailModalProps) {
   const { user } = useAuth();
   const [to, setTo] = useState(defaultTo.join(", "));
+  const [cc, setCc] = useState("");
   const [subject, setSubject] = useState(defaultSubject);
   const [bodyText, setBodyText] = useState(() => (user?.signatureText ? `\n\n${user.signatureText}` : ""));
   const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadingDefaults, setLoadingDefaults] = useState(Boolean(replyToThreadId) && defaultTo.length === 0);
+
+  useEffect(() => {
+    if (!replyToThreadId || defaultTo.length > 0) return;
+    let cancelled = false;
+    api
+      .get<{ to: string[]; cc: string[]; subject: string }>(
+        `/email-threads/${replyToThreadId}/reply-defaults?mode=${replyMode}`,
+      )
+      .then((res) => {
+        if (cancelled) return;
+        setTo(res.to.join(", "));
+        setCc(res.cc.join(", "));
+        setSubject((current) => current || res.subject);
+      })
+      .catch(() => {
+        // The reply still works with an empty To — the user can type the
+        // recipient in by hand, same as before this endpoint existed.
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDefaults(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [replyToThreadId, replyMode]); // intentionally excludes defaultTo — only its initial length matters
 
   const totalAttachmentBytes = files.reduce((sum, f) => sum + f.size, 0);
   const attachmentsTooLarge = totalAttachmentBytes > MAX_ATTACHMENTS_BYTES;
@@ -49,14 +81,18 @@ export function ComposeEmailModal({
         })),
       );
 
-      const toAddresses = to
-        .split(",")
-        .map((addr) => addr.trim())
-        .filter(Boolean);
+      const splitAddresses = (value: string) =>
+        value
+          .split(",")
+          .map((addr) => addr.trim())
+          .filter(Boolean);
+      const toAddresses = splitAddresses(to);
+      const ccAddresses = splitAddresses(cc);
 
       if (replyToThreadId) {
         await api.post(`/email-threads/${replyToThreadId}/reply`, {
           to: toAddresses.length > 0 ? toAddresses : undefined,
+          cc: ccAddresses,
           subject: subject || undefined,
           bodyText,
           attachments,
@@ -66,6 +102,7 @@ export function ComposeEmailModal({
           contactId: contactId ?? null,
           dealId: dealId ?? null,
           to: toAddresses,
+          cc: ccAddresses,
           subject,
           bodyText,
           attachments,
@@ -93,6 +130,11 @@ export function ComposeEmailModal({
             required
           />
         </label>
+        <label>
+          Cc
+          <input value={cc} onChange={(e) => setCc(e.target.value)} placeholder="name@example.com" />
+        </label>
+        {loadingDefaults && <p className="hint">Loading recipients...</p>}
         <label>
           Subject
           <input value={subject} onChange={(e) => setSubject(e.target.value)} required />

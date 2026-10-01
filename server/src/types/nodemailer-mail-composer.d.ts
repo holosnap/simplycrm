@@ -18,6 +18,7 @@ declare module "nodemailer/lib/mail-composer" {
   export interface MailComposerOptions {
     from?: string;
     to?: string | string[];
+    cc?: string | string[];
     subject?: string;
     messageId?: string;
     inReplyTo?: string;

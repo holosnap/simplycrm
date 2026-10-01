@@ -27,7 +27,7 @@ const PENDING_STATUSES = new Set(["queued", "sending"]);
 
 export function EmailThreadList({ contactId, dealId, defaultTo = [] }: EmailThreadListProps) {
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  const [compose, setCompose] = useState<{ threadId?: string } | null>(null);
+  const [compose, setCompose] = useState<{ threadId?: string; replyMode?: "reply" | "replyAll" } | null>(null);
 
   const refetch = useCallback(() => {
     // dealId takes priority: on a Deal page, contactId may also be passed
@@ -89,8 +89,15 @@ export function EmailThreadList({ contactId, dealId, defaultTo = [] }: EmailThre
                   <span>{` — ${statusLabel}`}</span>
                 ))}
               {thread.lastMessageAt && <span>{` (${new Date(thread.lastMessageAt).toLocaleString()})`}</span>}{" "}
-              <button type="button" onClick={() => setCompose({ threadId: thread.id })}>
+              <button type="button" onClick={() => setCompose({ threadId: thread.id, replyMode: "reply" })}>
                 Reply
+              </button>{" "}
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setCompose({ threadId: thread.id, replyMode: "replyAll" })}
+              >
+                Reply All
               </button>
             </li>
           );
@@ -103,6 +110,7 @@ export function EmailThreadList({ contactId, dealId, defaultTo = [] }: EmailThre
           contactId={contactId}
           dealId={dealId}
           replyToThreadId={compose.threadId}
+          replyMode={compose.replyMode}
           defaultTo={compose.threadId ? undefined : defaultTo}
           onClose={() => setCompose(null)}
           onSent={refetch}

@@ -12,6 +12,8 @@ import { DealsListPage } from "./pages/DealsListPage";
 import { DealDetailPage } from "./pages/DealDetailPage";
 import { DealFormPage } from "./pages/DealFormPage";
 import { TasksPage } from "./pages/TasksPage";
+import { InboxPage } from "./pages/InboxPage";
+import { ThreadViewPage } from "./pages/ThreadViewPage";
 import { CsvImportPage } from "./pages/CsvImportPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { AdminSettingsPage } from "./pages/AdminSettingsPage";
@@ -36,6 +38,10 @@ export default function App() {
           <Route path="/deals/new" element={<DealFormPage />} />
           <Route path="/deals/:id" element={<DealDetailPage />} />
           <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/inbox" element={<InboxPage />}>
+            <Route index element={<p className="hint">Select a thread to read it.</p>} />
+            <Route path=":id" element={<ThreadViewPage />} />
+          </Route>
           <Route path="/admin/users" element={<AdminUsersPage />} />
           <Route path="/admin/settings" element={<AdminSettingsPage />} />
           <Route path="/account" element={<MyAccountPage />} />

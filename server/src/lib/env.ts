@@ -38,4 +38,10 @@ export const env = {
   // Sending domain also used as the fallback Message-ID host for inbound
   // mail that arrives with no Message-ID header at all (rare, but happens).
   imapFallbackMessageIdHost: process.env.SES_SENDING_DOMAIN ?? "localhost",
+
+  // Email attachment storage (S3) — optional like SES/IMAP above; attachment
+  // upload/download simply isn't available until this is set. No credentials
+  // read here either — same default provider chain as the SES client.
+  attachmentsS3Bucket: process.env.ATTACHMENTS_S3_BUCKET,
+  attachmentsS3Region: process.env.ATTACHMENTS_S3_REGION ?? process.env.AWS_REGION,
 };

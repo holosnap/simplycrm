@@ -111,3 +111,13 @@ Log in as an admin → **Tags & Fields** settings page → **Email (AWS SES)** s
 - Requesting SES **production access** (still sandboxed to verified recipients / 200 per day until you file that AWS Support case — EMAIL_SPEC.md §2).
 - Any sending or receiving code — `EmailMessage`/`EmailThread`/`EmailEvent` and the actual send/webhook endpoints are separate, later work (EMAIL_SPEC.md §4–§5).
 - SNS → app event delivery (SQS vs. webhook, EMAIL_SPEC.md §3) — the SNS topic exists and is wired after this setup, but nothing is subscribed to consume it yet.
+
+## 7. Attachment storage (S3)
+
+Email attachments (both sent and received) are stored in S3, never in Postgres — see `server/src/lib/attachmentStorage.ts` and CLAUDE.md's "Email attachments" section. There's no provisioning script for this (unlike §2 above) since a bucket is a one-line console/CLI action with no DNS propagation wait; do it manually:
+
+1. Create a private S3 bucket (block all public access — attachments are only ever served via short-lived presigned URLs, never a public bucket policy).
+2. Set `ATTACHMENTS_S3_BUCKET` (and `ATTACHMENTS_S3_REGION`, if different from `AWS_REGION`) in `server/.env`.
+3. Attach the IAM policy at [`server/aws/s3-attachments-iam-policy.json`](./server/aws/s3-attachments-iam-policy.json) to the app's runtime role/credentials, substituting your real bucket name for `ATTACHMENTS_S3_BUCKET`. It grants only `s3:PutObject`/`s3:GetObject`, scoped to the `email-attachments/` prefix the app writes under — no `s3:ListBucket`, `s3:DeleteObject`, or bucket-level permissions, since the app never needs to enumerate or delete attachments.
+
+Until `ATTACHMENTS_S3_BUCKET` is set, attachment upload/download is disabled: composing or replying with an attachment returns a 400, and inbound messages with attachments are stored without them (the message itself — subject, body, thread — is still synced normally). Everything else in the app works unaffected, same as SES/IMAP being optional.

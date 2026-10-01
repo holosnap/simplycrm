@@ -15,7 +15,8 @@ server/                  Express + TypeScript API
   scripts/               One-off operator scripts (e.g. ses-setup.ts) — run manually
                           with the operator's own AWS credentials, not app code
   src/lib/               prisma client singleton, env loader, AWS SDK clients,
-                          email send/queue/retry, IMAP sync (inbound)
+                          email send/queue/retry, IMAP sync (inbound),
+                          S3 attachment storage
   src/middleware/auth.ts requireAuth / requireAdmin
   src/routes/*.ts        One router per resource
   src/types/             Ambient .d.ts for packages whose types our
@@ -75,12 +76,21 @@ Root `package.json` only has cross-workspace scripts (`dev:server`, `dev:client`
 - **No `Activity` row for IMAP-discovered messages.** `Activity.authorId` is required (real accountability data — see the Prisma conventions above), and no `User` authored an inbound email or a message sent outside the CRM. These messages are still fully visible via the Email section's thread view (reads `EmailThread`/`EmailMessage` directly), so don't try to force a fake author just to get a timeline entry.
 - `EmailMessageStatus` is reused for IMAP-observed messages (`delivered` for inbound, `sent` for outbound found in Sent) even though the enum was originally scoped to our own send pipeline — there's no better fit; don't read much into an IMAP-sourced message's `status` beyond "this message exists and which folder-ish side it's on."
 
+## Email attachments
+
+- **Bytes live in S3, never in Postgres.** `EmailAttachment` stores `s3Key`/`sizeBytes`/`declaredContentType`/`detectedContentType` only — no `data` column. All upload/download/content-sniffing goes through `src/lib/attachmentStorage.ts`; don't read/write S3 directly from a route or `imapSync.ts`.
+- **Never trust `declaredContentType` or `filename` alone.** `declaredContentType` is whatever the sender's mail client (inbound) or the compose request (outbound) claimed; `detectedContentType` is sniffed from the actual bytes (`file-type`, magic-byte detection) and may be `null` for formats it doesn't recognize. `filename` is sanitized (path separators and control characters stripped) before it's used anywhere — display, S3 metadata, or a download's `Content-Disposition` — and is never used to construct the S3 key itself (always a fresh random id, see `uploadAttachment`).
+- **Downloads are presigned URLs, not a direct file route.** `GET /api/email-attachments/:id/download-url` returns a short-lived (60s) presigned S3 URL with `Content-Disposition: attachment` — never stream attachment bytes through our own server, and never render one inline. The client can't attach its JWT to a plain navigation, so this is a normal authenticated JSON call first, then a separate navigation to the presigned URL.
+- `file-type` v22+ is pure ESM; this server compiles to CommonJS. It's loaded via an indirect dynamic import (`new Function("specifier", "return import(specifier)")` — see the comment in `attachmentStorage.ts`), the same technique used for `nodemailer/lib/mail-composer`'s ambient types, because a literal `await import(...)` gets down-leveled by `tsc` into a `require()` call that fails for an ESM-only package.
+- Attachment storage is optional, same pattern as SES/IMAP: unset `ATTACHMENTS_S3_BUCKET` means compose/reply with an attachment 400s with a clear message, and inbound messages with attachments are stored without them (the message itself still syncs) — see EMAIL_SPEC.md §9.
+
 ## Client (React) conventions
 
 - One component per file in `src/pages/`, named `<Thing>Page.tsx`; register its route in `src/App.tsx`. List pages fetch on mount with `useEffect`; detail pages take the id from `useParams`.
 - All API calls go through `src/lib/api.ts` (`api.get/post/patch/delete`) — don't call `fetch` directly from components.
 - Auth state lives in `AuthContext` (`useAuth()`), backed by a JWT in `localStorage`. Any route under the authenticated `Layout` assumes `useAuth().user` is non-null (the `Layout` itself redirects to `/login` otherwise).
 - Styling is a handful of global classes in `src/index.css` (`.page-header`, `.record-form`, `.hint`, etc.) — no CSS-in-JS or per-component stylesheets yet.
+- **Never render sender-supplied email HTML directly.** Always go through `sanitizeEmailHtml()` (`src/lib/sanitizeEmailHtml.ts`, DOMPurify + a remote-resource-blocking hook) and render the result inside `<EmailBodyRenderer>`'s sandboxed iframe (`sandbox="allow-same-origin"`, deliberately no `allow-scripts`) — never `dangerouslySetInnerHTML` an email body straight into the page. See EMAIL_SPEC.md §9 for why it's three layers (sanitizer, remote-content toggle, sandboxed iframe) and not just one.
 
 ## Scripts
 

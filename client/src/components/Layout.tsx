@@ -11,6 +11,7 @@ export function Layout() {
     <div className="app-shell">
       <nav className="sidebar">
         <div className="brand">SimplyCRM</div>
+        <NavLink to="/inbox">Inbox</NavLink>
         <NavLink to="/contacts">Contacts</NavLink>
         <NavLink to="/companies">Companies</NavLink>
         <NavLink to="/deals">Deals</NavLink>
