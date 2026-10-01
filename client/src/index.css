@@ -220,6 +220,10 @@ tr.clickable-row:hover {
   color: #dc2626;
 }
 
+.warning {
+  color: #b45309;
+}
+
 .hint {
   color: #6b7280;
   font-style: italic;

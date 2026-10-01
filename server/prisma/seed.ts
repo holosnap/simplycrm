@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { faker } from "@faker-js/faker";
 import bcrypt from "bcryptjs";
 import { prisma } from "../src/lib/prisma";
-import type { DealStage, ActivityType } from "@prisma/client";
+import type { Contact, DealStage, ActivityType, User } from "@prisma/client";
+
+// Matches the default SES_SENDING_DOMAIN in server/.env.example — seed data
+// is never actually sent, so this just needs to look like a real domain.
+const SEED_SENDING_DOMAIN = "mail.simplycrm.app";
 
 const DEAL_STAGES: DealStage[] = [
   "prospecting",
@@ -67,7 +72,13 @@ async function seedUsers() {
   const admin = await prisma.user.upsert({
     where: { email: "admin@example.com" },
     update: {},
-    create: { email: "admin@example.com", name: "Admin", role: "admin", passwordHash },
+    create: {
+      email: "admin@example.com",
+      name: "Admin",
+      role: "admin",
+      passwordHash,
+      signatureText: "Best,\nAdmin\nSimplyCRM",
+    },
   });
 
   const teamNames = ["Jordan Lee", "Priya Patel", "Sam Ortiz"];
@@ -84,8 +95,83 @@ async function seedUsers() {
   return users;
 }
 
+function textToHtml(text: string): string {
+  return `<p>${text.replace(/\n/g, "<br>")}</p>`;
+}
+
+// A handful of realistic, already-"sent" threads so the Email section on a
+// Contact/Deal isn't empty in a fresh seed. Written directly with
+// status: "sent" and a fake sesMessageId — this bypasses the real send
+// queue entirely (seed data is never meant to actually go out).
+async function seedEmailThreads(contacts: (Contact & { company: { name: string } })[], users: User[]) {
+  const sample = faker.helpers.arrayElements(contacts, 4);
+
+  for (const contact of sample) {
+    const author = pick(users);
+    const subject = faker.helpers.arrayElement([
+      "Following up on our call",
+      "Quick question about your rollout timeline",
+      "Pricing details as discussed",
+      "Checking in",
+    ]);
+    const sentAt = faker.date.recent({ days: 20 });
+    const firstBody = `Hi ${contact.firstName},\n\n${faker.lorem.sentences(2)}\n\nBest,\n${author.name}`;
+
+    const thread = await prisma.emailThread.create({
+      data: { contactId: contact.id, subject, lastMessageAt: sentAt },
+    });
+
+    const firstMessage = await prisma.emailMessage.create({
+      data: {
+        threadId: thread.id,
+        contactId: contact.id,
+        direction: "outbound",
+        authorId: author.id,
+        rfc822MessageId: `<msg-${randomUUID()}@${SEED_SENDING_DOMAIN}>`,
+        fromAddress: "notifications@" + SEED_SENDING_DOMAIN,
+        toAddresses: contact.email ? [contact.email] : ["prospect@example.com"],
+        subject,
+        bodyText: firstBody,
+        bodyHtml: textToHtml(firstBody),
+        status: "sent",
+        sesMessageId: randomUUID(),
+        sentAt,
+      },
+    });
+
+    // About half get a reply continuing the thread, to show threading in the demo.
+    if (faker.datatype.boolean()) {
+      const replyAt = faker.date.soon({ days: 3, refDate: sentAt });
+      const replyBody = `Hi ${contact.firstName},\n\n${faker.lorem.sentence()}\n\nBest,\n${author.name}`;
+      await prisma.emailMessage.create({
+        data: {
+          threadId: thread.id,
+          contactId: contact.id,
+          direction: "outbound",
+          authorId: author.id,
+          rfc822MessageId: `<msg-${randomUUID()}@${SEED_SENDING_DOMAIN}>`,
+          inReplyTo: firstMessage.rfc822MessageId,
+          fromAddress: "notifications@" + SEED_SENDING_DOMAIN,
+          toAddresses: firstMessage.toAddresses,
+          subject: subject.match(/^re:/i) ? subject : `Re: ${subject}`,
+          bodyText: replyBody,
+          bodyHtml: textToHtml(replyBody),
+          status: "sent",
+          sesMessageId: randomUUID(),
+          sentAt: replyAt,
+        },
+      });
+      await prisma.emailThread.update({ where: { id: thread.id }, data: { lastMessageAt: replyAt } });
+    }
+  }
+
+  return sample.length;
+}
+
 async function main() {
   // Clear existing demo data (keep it idempotent for repeated `prisma db seed` runs).
+  await prisma.emailMessage.deleteMany();
+  await prisma.emailThread.deleteMany();
   await prisma.activity.deleteMany();
   await prisma.deal.deleteMany();
   await prisma.contactTag.deleteMany();
@@ -192,12 +278,15 @@ async function main() {
     }),
   );
 
+  const emailThreadCount = await seedEmailThreads(contacts, users);
+
   console.log("Seeded:");
   console.log(`  ${users.length} users (admin@example.com / changeme123)`);
   console.log(`  ${companies.length} companies`);
   console.log(`  ${contacts.length} contacts`);
   console.log(`  ${deals.length} deals`);
   console.log(`  10 activities`);
+  console.log(`  ${emailThreadCount} email threads (already "sent" — demo data, never actually sent)`);
 }
 
 main()

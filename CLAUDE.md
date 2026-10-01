@@ -14,9 +14,11 @@ server/                  Express + TypeScript API
   aws/                   IAM policy templates for the app's own runtime credentials
   scripts/               One-off operator scripts (e.g. ses-setup.ts) — run manually
                           with the operator's own AWS credentials, not app code
-  src/lib/               prisma client singleton, env loader, AWS SDK clients
+  src/lib/               prisma client singleton, env loader, AWS SDK clients, email send/queue/retry
   src/middleware/auth.ts requireAuth / requireAdmin
   src/routes/*.ts        One router per resource
+  src/types/             Ambient .d.ts for packages whose types our
+                          moduleResolution can't otherwise find (see below)
   src/index.ts           App wiring: middleware + route mounting
 
 client/                  React + TypeScript SPA (Vite)
@@ -51,6 +53,16 @@ Root `package.json` only has cross-workspace scripts (`dev:server`, `dev:client`
 - **Never read, log, or store an AWS access key in our own code or the database.** AWS SDK clients (see `src/lib/ses.ts`) are constructed with no `credentials` option — the SDK's default provider chain resolves them on its own (env vars locally, an IAM role automatically in deployment). If you find yourself writing code that reads `AWS_ACCESS_KEY_ID` directly, stop — that almost always means you're about to pass it somewhere it shouldn't go.
 - **Two different privilege levels, never mixed.** The app's *runtime* IAM policy (`server/aws/*.json`) is scoped as narrowly as possible — e.g. SES is just `ses:SendEmail`/`ses:SendRawEmail` on one identity plus two scoped read-only health-check calls (see `SETUP.md`). *Provisioning* actions (verifying a domain, creating a configuration set, changing account-level settings) live in `server/scripts/` instead, run manually by a human operator with their own, broader AWS credentials — never granted to the deployed app. Adding a new AWS-touching feature means asking which bucket each new permission belongs in, not just adding it to whichever policy is closest at hand.
 - Provisioning scripts in `server/scripts/` should be idempotent (safe to re-run) and should converge to the desired state rather than silently no-op when a resource already exists in a different configuration — see `ses-setup.ts` for the create-or-update pattern.
+
+## Email sending
+
+- **Never send inline from a request handler.** Compose/reply routes (`src/routes/emailThreads.ts`) only ever create an `EmailMessage` row with `status: "queued"` and return — the actual SES call happens later, in `src/lib/emailQueue.ts`'s poller. If you add a new way to trigger an email, it goes through the same queue, not a direct `sesClient.send(...)` in the route.
+- The queue is an in-process `setInterval` poller reading `EmailMessage` rows from Postgres, not a real job-queue library or SQS — deliberate for this app's current scale (single process, modest volume); see EMAIL_SPEC.md §4a for the tradeoff and what would need to change to run multiple app instances safely.
+- A message stuck in `status: "sending"` at server startup means the process died mid-call to SES — the startup sweep in `emailQueue.ts` marks these `failed` rather than retrying them, since retrying risks a duplicate send if SES actually accepted it before the crash. Don't "fix" this by auto-resuming interrupted sends.
+- Retry classification lives in `src/lib/emailRetry.ts`: only `MessageRejected` and `AccountSuspendedException` are permanent; everything else retries with full-jitter exponential backoff up to a fixed attempt cap. Add a new permanent error name there, not as a one-off check elsewhere.
+- Send pacing comes from `src/lib/sesQuota.ts` (SES's actual `GetAccount().SendQuota.MaxSendRate`, cached), never a hardcoded rate.
+- `lastError` on `EmailMessage` is surfaced in the UI whenever it's set, including mid-retry while `status` is still `queued` — not only once a message reaches terminal `failed`. A send failing silently is treated as a bug.
+- `EmailThread`/`EmailMessage` are built; `EmailEvent` (and the SNS event-ingestion pipeline that would populate it) is not — see EMAIL_SPEC.md's status line before assuming `status` ever reaches `delivered`/`bounced`/`complained` today.
 
 ## Client (React) conventions
 

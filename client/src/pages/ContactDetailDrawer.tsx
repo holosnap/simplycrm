@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Drawer } from "../components/Drawer";
 import { ContactForm } from "../components/ContactForm";
+import { EmailThreadList } from "../components/EmailThreadList";
 import { api, ApiError } from "../lib/api";
 import { toContactApiPayload, type ContactFormValues } from "../lib/schemas/contact";
 import { DEAL_STAGE_LABELS, formatCurrency, type DealStage } from "../lib/deals";
@@ -144,6 +145,8 @@ export function ContactDetailDrawer() {
         </button>
       </div>
       {deleteError && <p className="error">{deleteError}</p>}
+
+      <EmailThreadList contactId={contact.id} defaultTo={contact.email ? [contact.email] : []} />
 
       <section>
         <h2>Deals</h2>

@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { DEAL_STAGES, DEAL_STAGE_LABELS, formatCurrency, type DealStage } from "../lib/deals";
+import { EmailThreadList } from "../components/EmailThreadList";
 
 interface Activity {
   id: string;
@@ -17,7 +18,7 @@ interface Deal {
   stage: DealStage;
   expectedCloseDate: string | null;
   company: { id: string; name: string } | null;
-  contact: { id: string; firstName: string; lastName: string } | null;
+  contact: { id: string; firstName: string; lastName: string; email: string | null } | null;
   owner: { id: string; name: string } | null;
   activities: Activity[];
 }
@@ -88,6 +89,12 @@ export function DealDetailPage() {
           {deal.expectedCloseDate ? new Date(deal.expectedCloseDate).toLocaleDateString() : "—"}
         </p>
       </section>
+
+      <EmailThreadList
+        dealId={deal.id}
+        contactId={deal.contact?.id}
+        defaultTo={deal.contact?.email ? [deal.contact.email] : []}
+      />
 
       <section>
         <h2>Activity</h2>
