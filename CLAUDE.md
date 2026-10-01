@@ -11,7 +11,10 @@ server/                  Express + TypeScript API
   prisma/schema.prisma   Data model (source of truth for the DB)
   prisma/migrations/     Generated migrations — never hand-edit
   prisma/seed.ts         Fake-data seed script (faker)
-  src/lib/               prisma client singleton, env loader
+  aws/                   IAM policy templates for the app's own runtime credentials
+  scripts/               One-off operator scripts (e.g. ses-setup.ts) — run manually
+                          with the operator's own AWS credentials, not app code
+  src/lib/               prisma client singleton, env loader, AWS SDK clients
   src/middleware/auth.ts requireAuth / requireAdmin
   src/routes/*.ts        One router per resource
   src/index.ts           App wiring: middleware + route mounting
@@ -43,6 +46,12 @@ Root `package.json` only has cross-workspace scripts (`dev:server`, `dev:client`
 - Route handlers return the resource wrapped in a named key (`{ contact }`, `{ contacts }`, `{ deal }`), not bare arrays/objects, so the client can add metadata (pagination, etc.) later without a breaking shape change.
 - **Never `include: true` a `User` relation** (`owner`, `assignee`, `author`, etc.) — the full row includes `passwordHash`. Always `include: { owner: { select: publicUserSelect } }` using the shared select from `src/lib/publicUser.ts`.
 
+## AWS credentials (SES, etc.)
+
+- **Never read, log, or store an AWS access key in our own code or the database.** AWS SDK clients (see `src/lib/ses.ts`) are constructed with no `credentials` option — the SDK's default provider chain resolves them on its own (env vars locally, an IAM role automatically in deployment). If you find yourself writing code that reads `AWS_ACCESS_KEY_ID` directly, stop — that almost always means you're about to pass it somewhere it shouldn't go.
+- **Two different privilege levels, never mixed.** The app's *runtime* IAM policy (`server/aws/*.json`) is scoped as narrowly as possible — e.g. SES is just `ses:SendEmail`/`ses:SendRawEmail` on one identity plus two scoped read-only health-check calls (see `SETUP.md`). *Provisioning* actions (verifying a domain, creating a configuration set, changing account-level settings) live in `server/scripts/` instead, run manually by a human operator with their own, broader AWS credentials — never granted to the deployed app. Adding a new AWS-touching feature means asking which bucket each new permission belongs in, not just adding it to whichever policy is closest at hand.
+- Provisioning scripts in `server/scripts/` should be idempotent (safe to re-run) and should converge to the desired state rather than silently no-op when a resource already exists in a different configuration — see `ses-setup.ts` for the create-or-update pattern.
+
 ## Client (React) conventions
 
 - One component per file in `src/pages/`, named `<Thing>Page.tsx`; register its route in `src/App.tsx`. List pages fetch on mount with `useEffect`; detail pages take the id from `useParams`.
@@ -54,13 +63,13 @@ Root `package.json` only has cross-workspace scripts (`dev:server`, `dev:client`
 
 Root: `npm run dev:server` / `dev:client`, `npm run build`, `npm run typecheck`.
 
-Server (`cd server`): `npm run prisma:generate`, `npm run prisma:migrate` (dev migration), `npm run prisma:seed`.
+Server (`cd server`): `npm run prisma:generate`, `npm run prisma:migrate` (dev migration), `npm run prisma:seed`, `npm run ses:setup` (one-time SES provisioning, see `SETUP.md`).
 
-`npm run typecheck` in `server/` type-checks both `src/` and `prisma/` (see `tsconfig.typecheck.json`) — the seed script is real code and should stay type-safe even though it isn't part of the production build.
+`npm run typecheck` in `server/` type-checks `src/`, `prisma/`, and `scripts/` (see `tsconfig.typecheck.json`) — scripts are real code and should stay type-safe even though they aren't part of the production build.
 
 ## Environment
 
-Each workspace has a `.env.example`; copy to `.env` locally (`.env` is gitignored, never commit it). Server needs a running Postgres reachable at `DATABASE_URL`. Seeded login: `admin@example.com` / `changeme123` (plus a few `@example.com` team users — see `prisma/seed.ts`).
+Each workspace has a `.env.example`; copy to `.env` locally (`.env` is gitignored, never commit it). Server needs a running Postgres reachable at `DATABASE_URL`. Seeded login: `admin@example.com` / `changeme123` (plus a few `@example.com` team users — see `prisma/seed.ts`). Email (AWS SES) is optional and unset by default — see `SETUP.md` to provision it; the app boots fine without it, with the email health check reporting "not configured."
 
 ## Adding a new entity — checklist
 
